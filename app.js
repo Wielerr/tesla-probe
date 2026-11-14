@@ -8,7 +8,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '1';
+  var VERSION = '2';
   var core = window.ProbeCore;
 
   var LOG_SECONDS = 30 * 60;
@@ -1005,6 +1005,7 @@
   // ---- drive test ----------------------------------------------------------
 
   var driveActive = false;
+  var driveStartedAt = 0;
   var log = null;
   var lastToneTime = 0;
 
@@ -1021,6 +1022,7 @@
 
   function startDrive() {
     driveActive = true;
+    driveStartedAt = Date.now();
     $('drive-overlay').hidden = false;
     sizeCanvas(driveCanvas);
     log.reset(Date.now());
@@ -1186,8 +1188,13 @@
   function tick() {
     measureFps();
     sensorTick(true);
-    if (driveActive) logTick();
-    else renderCanvas();
+    if (!driveActive) {
+      renderCanvas();
+    } else if (Date.now() - driveStartedAt >= 1000) {
+      // An entry describes the second before it. This timer runs since page load, so its
+      // first beat after the start would mostly describe the time before the drive test.
+      logTick();
+    }
   }
 
   function init() {
