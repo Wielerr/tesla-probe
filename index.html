@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="robots" content="noindex">
+<title>Tesla-Karaoke Probe</title>
+<link rel="icon" href="data:,">
+<script>
+  // Shows script errors on the page itself: the car has no developer tools.
+  window.probeErrors = [];
+  window.onerror = function (message, source, line) {
+    var where = source ? ' (' + String(source).split('/').pop().split('?')[0] + ':' + line + ')' : '';
+    window.probeErrors.push(message + where);
+    var box = document.getElementById('error');
+    if (box) {
+      box.hidden = false;
+      box.textContent = 'Fehler im Skript: ' + window.probeErrors.join(' | ');
+      var hint = document.getElementById('hint');
+      if (hint) hint.hidden = true;
+    }
+  };
+</script>
+<style>
+  :root {
+    --night: #10122a;
+    --pit: #0a0b1c;
+    --panel: #1a1d40;
+    --edge: #2c3068;
+    --ink: #f4f1e8;
+    --soft: #a9acd6;
+    --go: #46e3a1;
+    --caution: #ffcb47;
+    --stop: #ff6680;
+    --live: #63c7ff;
+    --btn-h: 72px; /* raised by app.js from devicePixelRatio */
+    --gap: 0.5rem;
+    --pad: 0.8rem;
+  }
+
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+
+  /* Everything scales with the viewport, so one screen stays one screen
+     whatever zoom and pixel density the car's browser picks. */
+  html {
+    height: 100%;
+    font-size: 2.5vh;
+    font-size: clamp(13px, min(2.55vh, 1.55vw), 28px);
+  }
+  body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    background: var(--night);
+    color: var(--ink);
+    font-family: system-ui, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.25;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  /* ---- header ---- */
+  .top {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    padding: 0.45rem var(--pad) 0.35rem;
+  }
+  .top h1 { margin: 0; font-size: 1.05rem; font-weight: 700; white-space: nowrap; }
+  .top p {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    font-size: 0.8rem;
+    color: var(--soft);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .top p.error { color: var(--stop); font-weight: 600; white-space: normal; }
+  .top .version { font-size: 0.8rem; color: var(--soft); white-space: nowrap; }
+
+  /* ---- result rows ---- */
+  .grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: repeat(5, minmax(0, 1fr));
+    grid-auto-flow: column;
+    gap: var(--gap);
+    padding: 0 var(--pad);
+    min-height: 0;
+  }
+  .test {
+    display: grid;
+    grid-template-columns: 3.4rem minmax(0, 1fr) auto;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--panel);
+    border-radius: 0.7rem;
+  }
+  /* The lamp carries the verdict: colour, plus a word for anyone who cannot rely on colour. */
+  .lamp {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.15rem;
+    background: var(--edge);
+    color: var(--soft);
+    font-weight: 700;
+  }
+  .lamp .num { font-size: 1.4rem; line-height: 1; }
+  .lamp .mark { font-size: 0.62rem; line-height: 1; min-height: 1em; }
+  .test[data-state="run"] .lamp { background: var(--live); color: #04263a; }
+  .test[data-state="ok"] .lamp { background: var(--go); color: #06281a; }
+  .test[data-state="warn"] .lamp { background: var(--caution); color: #2e2200; }
+  .test[data-state="fail"] .lamp { background: var(--stop); color: #33000b; }
+
+  .body {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    padding: 0.3rem 0.7rem;
+  }
+  .body h2 { margin: 0; font-size: 0.8rem; font-weight: 600; color: var(--soft); }
+  .value { margin: 0.05rem 0 0; font-size: 1.12rem; font-weight: 600; line-height: 1.2; }
+  .detail {
+    margin: 0.15rem 0 0;
+    font-size: 0.74rem;
+    line-height: 1.3;
+    color: var(--soft);
+    overflow-wrap: anywhere;
+  }
+  .detail:empty { display: none; }
+
+  .aside { display: flex; align-items: center; gap: 0.7rem; padding-right: 0.7rem; }
+  .aside:empty { display: none; }
+
+  /* formats */
+  .chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+  .chip {
+    padding: 0.1rem 0.5rem;
+    border-radius: 0.4rem;
+    background: var(--edge);
+    color: var(--soft);
+    font-size: 0.86rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .chip[data-state="ok"] { background: var(--go); color: #06281a; }
+  .chip[data-state="fail"] { background: var(--stop); color: #33000b; }
+
+  /* canvas */
+  #mini-canvas { width: 7rem; height: 3rem; display: block; background: var(--pit); border-radius: 0.4rem; }
+
+  /* microphone */
+  .mic-read { display: grid; gap: 0.3rem; justify-items: end; }
+  .note { font-size: 1.9rem; font-weight: 700; line-height: 1; white-space: nowrap; }
+  .note small { font-size: 0.7rem; font-weight: 600; color: var(--soft); margin-left: 0.3rem; }
+  .meter { width: 7rem; height: 0.55rem; background: var(--pit); border-radius: 0.3rem; overflow: hidden; }
+  .meter i { display: block; height: 100%; width: 0; background: var(--live); border-radius: 0.3rem; }
+
+  /* echo */
+  .pair { display: grid; grid-template-columns: auto auto; gap: 0 0.9rem; text-align: right; }
+  .pair small { font-size: 0.7rem; color: var(--soft); }
+  .pair b { font-size: 1.25rem; white-space: nowrap; }
+
+  /* drive sensor */
+  #sensor-video { width: 5.4rem; height: 3rem; display: block; background: var(--pit); border-radius: 0.4rem; }
+
+  /* ---- buttons ---- */
+  button {
+    min-height: var(--btn-h);
+    padding: 0 0.6rem;
+    border: 0;
+    border-radius: 0.8rem;
+    background: var(--edge);
+    color: var(--ink);
+    font: inherit;
+    font-size: 1.1rem;
+    font-weight: 700;
+    cursor: pointer;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  button:active { filter: brightness(1.25); }
+  button:focus-visible { outline: 3px solid var(--live); outline-offset: 2px; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button[aria-pressed="true"] { background: var(--live); color: #04263a; }
+  button.primary { background: var(--ink); color: var(--night); }
+
+  .actions {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: var(--gap);
+    padding: var(--gap) var(--pad) 0.6rem;
+  }
+
+  /* ---- drive test: nothing to read, nothing to operate ---- */
+  #drive-overlay { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 10; background: var(--night); }
+  #drive-canvas { width: 100%; height: 100%; display: block; }
+
+  #ask {
+    position: fixed;
+    left: 50%;
+    bottom: 8vh;
+    z-index: 30;
+    transform: translateX(-50%);
+    width: 90vw;
+    max-width: 46rem;
+    display: grid;
+    gap: 0.8rem;
+    padding: 1rem;
+    background: var(--panel);
+    border: 2px solid var(--edge);
+    border-radius: 1rem;
+    box-shadow: 0 1rem 3rem rgba(0, 0, 0, 0.55);
+  }
+  #ask p { margin: 0; font-size: 1.15rem; font-weight: 700; text-align: center; }
+  #ask div { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
+
+  /* ---- evaluation ---- */
+  #eval {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 20;
+    display: grid;
+    grid-template-rows: auto minmax(0, 5fr) minmax(0, 2fr) auto;
+    gap: var(--gap);
+    padding: 0 var(--pad) 0.6rem;
+    background: var(--night);
+  }
+  #eval .top { padding-left: 0; padding-right: 0; padding-bottom: 0; }
+  #eval .rows { display: grid; grid-template-rows: repeat(5, minmax(0, 1fr)); gap: var(--gap); min-height: 0; }
+  #eval .test { grid-template-columns: 4.6rem minmax(0, 1fr); }
+  #eval .lamp .mark { font-size: 0.8rem; }
+  .timeline { margin: 0; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 0.2rem; }
+  .timeline canvas { width: 100%; height: 100%; display: block; min-height: 0; }
+  .timeline figcaption { font-size: 0.74rem; color: var(--soft); }
+  #eval .actions { padding: 0; grid-template-columns: 1fr; }
+
+  /* ---- phone or narrow window: one column, scrolling allowed ---- */
+  @media (max-width: 760px), (orientation: portrait) {
+    html { font-size: 15px; }
+    body { display: block; height: auto; overflow: auto; }
+    .top { flex-wrap: wrap; }
+    .top p { white-space: normal; flex-basis: 100%; }
+    .grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; grid-auto-flow: row; }
+    .test { min-height: 5.6rem; }
+    .actions { grid-template-columns: 1fr 1fr; position: sticky; bottom: 0; background: var(--night); }
+    #eval { overflow: auto; grid-template-rows: auto auto 9rem auto; }
+    #eval .rows { grid-template-rows: none; }
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <h1>Tesla-Karaoke Probe</h1>
+  <p id="hint">Die Tests 1, 2, 3, 5, 8 und 10 laufen von selbst. Für 4, 6, 7 und 9 unten tippen.</p>
+  <p id="error" class="error" role="alert" hidden></p>
+  <span class="version" id="version"></span>
+</header>
+
+<main class="grid" id="tests">
+  <section class="test" id="t-env" data-state="idle">
+    <div class="lamp"><span class="num">1</span><span class="mark"></span></div>
+    <div class="body"><h2>Umgebung</h2><p class="value">Wird gelesen ...</p><p class="detail"></p></div>
+  </section>
+
+  <section class="test" id="t-storage" data-state="idle">
+    <div class="lamp"><span class="num">2</span><span class="mark"></span></div>
+    <div class="body"><h2>Speicher</h2><p class="value">Wird geprüft ...</p><p class="detail"></p></div>
+  </section>
+
+  <section class="test" id="t-formats" data-state="idle">
+    <div class="lamp"><span class="num">3</span><span class="mark"></span></div>
+    <div class="body"><h2>Audioformate</h2><p class="value chips" id="format-chips">Wird geprüft ...</p><p class="detail"></p></div>
+  </section>
+
+  <section class="test" id="t-tone" data-state="idle">
+    <div class="lamp"><span class="num">4</span><span class="mark"></span></div>
+    <div class="body"><h2>Ton</h2><p class="value"></p><p class="detail"></p></div>
+  </section>
+
+  <section class="test" id="t-canvas" data-state="idle">
+    <div class="lamp"><span class="num">5</span><span class="mark"></span></div>
+    <div class="body"><h2>Canvas</h2><p class="value">Wird gemessen ...</p><p class="detail"></p></div>
+    <div class="aside"><canvas id="mini-canvas"></canvas></div>
+  </section>
+
+  <section class="test" id="t-mic" data-state="idle">
+    <div class="lamp"><span class="num">6</span><span class="mark"></span></div>
+    <div class="body"><h2>Mikrofon</h2><p class="value"></p><p class="detail"></p></div>
+    <div class="aside">
+      <div class="mic-read">
+        <div class="note"><span id="mic-note"></span><small id="mic-cents"></small></div>
+        <div class="meter"><i id="mic-meter"></i></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="test" id="t-echo" data-state="idle">
+    <div class="lamp"><span class="num">7</span><span class="mark"></span></div>
+    <div class="body"><h2>Echo</h2><p class="value"></p><p class="detail"></p></div>
+    <div class="aside">
+      <div class="pair">
+        <small>mit Unterdrückung</small><small>ohne</small>
+        <b id="echo-on">–</b><b id="echo-off">–</b>
+      </div>
+    </div>
+  </section>
+
+  <section class="test" id="t-sensor" data-state="idle">
+    <div class="lamp"><span class="num">8</span><span class="mark"></span></div>
+    <div class="body"><h2>Fahrsensor</h2><p class="value">Sensor-Video wird geladen ...</p><p class="detail"></p></div>
+    <div class="aside">
+      <!-- The page never pauses this video. If it stops, the car did it. -->
+      <video id="sensor-video" muted loop playsinline preload="auto" aria-hidden="true" tabindex="-1">
+        <source src="media/drive-sensor.webm" type="video/webm">
+        <source src="media/drive-sensor.mp4" type="video/mp4">
+      </video>
+    </div>
+  </section>
+
+  <section class="test" id="t-media" data-state="idle">
+    <div class="lamp"><span class="num">9</span><span class="mark"></span></div>
+    <div class="body"><h2>Media Session</h2><p class="value"></p><p class="detail"></p></div>
+  </section>
+
+  <section class="test" id="t-conn" data-state="idle">
+    <div class="lamp"><span class="num">10</span><span class="mark"></span></div>
+    <div class="body"><h2>Verbindungen</h2><p class="value">Wird geprüft ...</p><p class="detail"></p></div>
+  </section>
+</main>
+
+<nav class="actions" aria-label="Tests starten">
+  <button type="button" id="btn-tone" aria-pressed="false">Ton an</button>
+  <button type="button" id="btn-mic" aria-pressed="false">Mikrofon an</button>
+  <button type="button" id="btn-echo">Echo messen</button>
+  <button type="button" id="btn-drive" class="primary">Fahrtest starten</button>
+  <button type="button" id="btn-eval">Auswertung</button>
+</nav>
+
+<div id="drive-overlay" hidden>
+  <canvas id="drive-canvas" aria-label="Protokoll läuft"></canvas>
+</div>
+
+<section id="eval" hidden>
+  <header class="top">
+    <h1>Auswertung Fahrtest</h1>
+    <p id="eval-meta"></p>
+  </header>
+  <div class="rows">
+    <section class="test" id="ev-log" data-state="idle">
+      <div class="lamp"><span class="mark"></span></div>
+      <div class="body"><h2>Protokoll</h2><p class="value"></p><p class="detail"></p></div>
+    </section>
+    <section class="test" id="ev-drive" data-state="idle">
+      <div class="lamp"><span class="mark"></span></div>
+      <div class="body"><h2>Fahrbetrieb</h2><p class="value"></p><p class="detail"></p></div>
+    </section>
+    <section class="test" id="ev-mic" data-state="idle">
+      <div class="lamp"><span class="mark"></span></div>
+      <div class="body"><h2>Mikrofon</h2><p class="value"></p><p class="detail"></p></div>
+    </section>
+    <section class="test" id="ev-tone" data-state="idle">
+      <div class="lamp"><span class="mark"></span></div>
+      <div class="body"><h2>Ton</h2><p class="value"></p><p class="detail"></p></div>
+    </section>
+    <section class="test" id="ev-canvas" data-state="idle">
+      <div class="lamp"><span class="mark"></span></div>
+      <div class="body"><h2>Canvas</h2><p class="value"></p><p class="detail"></p></div>
+    </section>
+  </div>
+  <figure class="timeline">
+    <canvas id="timeline-canvas"></canvas>
+    <figcaption>Zeitverlauf von links nach rechts. Gelb: Fahrbetrieb erkannt. Grün: lief. Rot: lief nicht. Dunkel: kein Eintrag.</figcaption>
+  </figure>
+  <div class="actions">
+    <button type="button" id="btn-eval-back">Zurück zu den Tests</button>
+  </div>
+</section>
+
+<div id="ask" role="dialog" aria-labelledby="ask-text" hidden>
+  <p id="ask-text"></p>
+  <div>
+    <button type="button" id="ask-yes" class="primary"></button>
+    <button type="button" id="ask-no"></button>
+  </div>
+</div>
+
+<audio id="tone" loop preload="auto"></audio>
+
+<script src="core.js?v=1"></script>
+<script src="app.js?v=1"></script>
+</body>
+</html>
