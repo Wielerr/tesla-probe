@@ -8,7 +8,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '2';
+  var VERSION = '3';
   var core = window.ProbeCore;
 
   var LOG_SECONDS = 30 * 60;
@@ -776,29 +776,39 @@
 
   // ---- 7 echo --------------------------------------------------------------
 
-  var ECHO_HELP = 'Lautstärke wie beim Singen einstellen, „Echo messen“ tippen und etwa zwölf Sekunden still sein.';
+  var ECHO_HELP = 'Lautstärke wie beim Singen einstellen und „Echo messen“ tippen. Erst zwölf Sekunden still sein, dann fünf Sekunden laut mitsingen.';
   var echoBusy = false;
 
+  /**
+   * The row answers what matters for karaoke: does the voice stand out
+   * from the music that the microphone picks up from the speakers? What
+   * echo cancellation contributes is a detail of that.
+   */
   function renderEcho(levels, applied) {
-    var verdict = core.echoVerdict(levels);
-    var state = verdict.verdict;
+    var echo = core.echoVerdict(levels);
+    // The quieter of the two settings is the one the player would use.
+    var music = typeof levels.onDb === 'number' && typeof levels.offDb === 'number' ? Math.min(levels.onDb, levels.offDb) : null;
+    var voice = core.voiceVerdict({ musicDb: music, voiceDb: levels.voiceDb });
     var text = {
       nodata: 'Messung ohne Signal: Das Mikrofon lieferte keine Daten',
-      quiet: 'Das Mikrofon hört die Melodie kaum',
-      effective: 'Echounterdrückung nimmt ' + verdict.attenuationDb + ' dB von der Musik weg',
-      partial: 'Echounterdrückung nimmt nur ' + verdict.attenuationDb + ' dB von der Musik weg',
-      'no-effect': 'Echounterdrückung hilft nicht (' + verdict.attenuationDb + ' dB)'
-    }[verdict.reason];
-    var detail = 'Ruhepegel ' + decibel(levels.silenceDb) + '.';
-    if (verdict.reason === 'quiet') {
-      detail += ' Lautstärke erhöhen und wiederholen. Bleibt es so, filtert das Auto die Musik schon selbst heraus.';
-    }
+      clear: 'Stimme ' + voice.marginDb + ' dB über der Musik',
+      close: 'Stimme nur ' + voice.marginDb + ' dB über der Musik',
+      buried: voice.marginDb > 0 ? 'Stimme nur ' + voice.marginDb + ' dB über der Musik' : 'Stimme nicht lauter als die Musik'
+    }[voice.reason];
+    // Kept short: the row is narrow in the car and has to stay readable on a photo.
+    var detail = 'Stimme ' + decibel(levels.voiceDb) + ', Ruhe ' + decibel(levels.silenceDb) + '. ' + {
+      nodata: '',
+      quiet: 'Das Mikrofon hört die Melodie kaum, lauter stellen.',
+      effective: 'Echounterdrückung nimmt ' + echo.attenuationDb + ' dB weg.',
+      partial: 'Echounterdrückung nimmt nur ' + echo.attenuationDb + ' dB weg.',
+      'no-effect': 'Echounterdrückung bewirkt nichts.'
+    }[echo.reason];
     if (applied.on === false || applied.off === true) {
       detail += ' Der Browser hat die Einstellung nicht übernommen (gemeldet: ' + onOff(applied.on) + ' und ' + onOff(applied.off) + ').';
     }
     $('echo-on').textContent = decibel(levels.onDb);
     $('echo-off').textContent = decibel(levels.offDb);
-    setRow('t-echo', state, text, detail);
+    setRow('t-echo', voice.verdict, text, detail);
   }
 
   function runEcho() {
@@ -810,13 +820,13 @@
     mic.error = null;
     updateButtons();
 
-    var levels = { silenceDb: null, onDb: null, offDb: null };
+    var levels = { silenceDb: null, onDb: null, offDb: null, voiceDb: null };
     var applied = { on: null, off: null };
     var withEcho = { echoCancellation: true, noiseSuppression: false, autoGainControl: false };
 
-    function progress(step, text) {
-      setRow('t-echo', 'run', 'Schritt ' + step + ' von 3: ' + text,
-        'Bitte still sein, die Messung läuft. Fragt das Auto erneut nach dem Mikrofon, die Freigabe bestätigen.');
+    function progress(step, text, detail) {
+      setRow('t-echo', 'run', 'Schritt ' + step + ' von 4: ' + text,
+        detail || 'Bitte still sein, die Messung läuft. Fragt das Auto erneut nach dem Mikrofon, die Freigabe bestätigen.');
     }
     function setting() {
       var value = micSettings().echoCancellation;
@@ -861,6 +871,15 @@
       })
       .then(function (db) {
         levels.offDb = db;
+        // The melody plays on: now the voice has to show how far it stands above it.
+        progress(4, 'Jetzt laut mitsingen', 'Fünf Sekunden lang laut mitsingen oder summen, so wie später beim Karaoke.');
+        return wait(1000);
+      })
+      .then(function () {
+        return measureLevel(4000);
+      })
+      .then(function (db) {
+        levels.voiceDb = db;
         stopTone();
         renderEcho(levels, applied);
       })
@@ -881,7 +900,64 @@
 
   var video = $('sensor-video');
   var sensor = core.createDriveSensor();
-  var sensorInfo = { everPlayed: false, pauses: 0, driveSince: 0, loadStart: Date.now(), startError: '' };
+  var sensorInfo = { everPlayed: false, pauses: 0, driveSince: 0, loadStart: Date.now(), startError: '', frames: null, image: null };
+
+  // Two ways to see whether pictures of the video still arrive. A Tesla in D lets the
+  // element play on and only freezes the picture: pause and clock say nothing there.
+  var frameCounter = { supported: typeof video.requestVideoFrameCallback === 'function', count: 0, id: 0 };
+  var snapshot = { canvas: document.createElement('canvas'), width: 32, height: 18, last: null };
+  snapshot.canvas.width = snapshot.width;
+  snapshot.canvas.height = snapshot.height;
+
+  function onVideoFrame() {
+    frameCounter.count++;
+    frameCounter.id = video.requestVideoFrameCallback(onVideoFrame);
+  }
+
+  function armFrameCounter() {
+    if (!frameCounter.supported) return;
+    try {
+      if (frameCounter.id && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(frameCounter.id);
+      frameCounter.id = video.requestVideoFrameCallback(onVideoFrame);
+    } catch (e) {
+      frameCounter.supported = false;
+    }
+  }
+
+  /** Pictures presented since the last call, or null if the browser cannot count them. */
+  function takeFrames() {
+    if (!frameCounter.supported) return null;
+    var count = frameCounter.count;
+    frameCounter.count = 0;
+    // None came: ask again, in case the pending request got lost while the picture stood.
+    if (count === 0) armFrameCounter();
+    return count;
+  }
+
+  /** 'moving', 'still' or 'black' from a small copy of the video picture, or null if it cannot be read. */
+  function takeImage() {
+    try {
+      var g = snapshot.canvas.getContext('2d', { willReadFrequently: true });
+      g.drawImage(video, 0, 0, snapshot.width, snapshot.height);
+      var pixels = g.getImageData(0, 0, snapshot.width, snapshot.height).data;
+      var signature = core.imageSignature(pixels, snapshot.width, snapshot.height);
+      var result = core.compareImages(snapshot.last, signature);
+      snapshot.last = signature;
+      return result;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** What each signal of the sensor shows right now, as one sentence. */
+  function describeSignals() {
+    var s = sensor.signals;
+    var frames = s.frames === 'unknown' ? 'Bilder nicht zählbar'
+      : s.frames === 'stopped' ? 'keine neuen Bilder'
+      : sensorInfo.frames + ' Bilder pro Sekunde';
+    var image = { moving: 'Abbild bewegt sich', still: 'Abbild steht', black: 'Abbild schwarz', unknown: 'Abbild nicht lesbar' }[s.image];
+    return [s.paused ? 'Element pausiert' : 'Element spielt', s.clock === 'stopped' ? 'Uhr steht' : 'Uhr läuft', frames, image].join(', ') + '.';
+  }
 
   function startSensor() {
     try {
@@ -912,35 +988,41 @@
         'Einmal irgendwo tippen. Im Stand heißt das: Der Browser sperrt Autoplay.' + (sensorInfo.startError ? ' Gemeldet: ' + sensorInfo.startError + '.' : ''));
     } else if (state === 'drive') {
       setRow('t-sensor', 'warn', 'Fahrbetrieb erkannt',
-        'Das Video ' + (sensor.reason === 'paused' ? 'wurde ohne Nutzeraktion pausiert' : 'steht still, ohne Pause-Ereignis') +
-          ', seit ' + duration(Math.round((Date.now() - sensorInfo.driveSince) / 1000)) + '. Pausen bisher: ' + sensorInfo.pauses + '.',
+        describeSignals() + ' Seit ' + duration(Math.round((Date.now() - sensorInfo.driveSince) / 1000)) + ', Pausen: ' + sensorInfo.pauses + '.',
         'Fahrt');
     } else {
       var file = (video.currentSrc || '').split('/').pop().split('?')[0];
       setRow('t-sensor', 'ok', 'Parkmodus: Video läuft',
-        'Quelle ' + file + '. Pausen ohne Nutzeraktion bisher: ' + sensorInfo.pauses + '. Stoppt das Auto das Video, steht hier „Fahrbetrieb erkannt“.');
+        describeSignals() + ' Quelle ' + file + ', Pausen: ' + sensorInfo.pauses + '.');
     }
   }
 
   /**
-   * retry: ask the video to play again if it is paused. Only the one-second
-   * timer does that, never the pause event itself, or a car that pauses every
-   * attempt would spin the page in a tight loop.
+   * timer: called by the one-second timer. Only then the page counts the
+   * pictures, copies one, and asks a paused video to play again. The pause
+   * event itself never retries, or a car that pauses every attempt would
+   * spin the page in a tight loop.
    */
-  function sensorTick(retry) {
+  function sensorTick(timer) {
     var visible = document.visibilityState !== 'hidden';
     var loaded = video.readyState >= 2;
     if (!video.paused && video.currentTime > 0) sensorInfo.everPlayed = true;
+    if (timer) {
+      sensorInfo.frames = takeFrames();
+      sensorInfo.image = loaded ? takeImage() : null;
+    }
     var state = sensor.update({
       t: Date.now(),
       available: loaded && sensorInfo.everPlayed,
       visible: visible,
       paused: video.paused,
-      currentTime: video.currentTime
+      currentTime: video.currentTime,
+      frames: sensorInfo.frames,
+      image: sensorInfo.image
     });
     if (state !== 'drive') sensorInfo.driveSince = 0;
     else if (!sensorInfo.driveSince) sensorInfo.driveSince = Date.now();
-    if (retry && visible && video.paused) startSensor();
+    if (timer && visible && video.paused) startSensor();
     renderSensor(state, loaded, visible);
   }
 
@@ -1017,7 +1099,7 @@
     var track = mic.track;
     var micCode = !track ? core.MIC.NONE : track.readyState !== 'live' ? core.MIC.ENDED : track.muted ? core.MIC.MUTED : core.MIC.LIVE;
     var driveCode = sensor.state === 'drive' ? core.DRIVE.DRIVE : sensor.state === 'park' ? core.DRIVE.PARK : core.DRIVE.UNKNOWN;
-    log.push([Date.now(), driveCode, micCode, takeLevel(), toneRunning ? 1 : 0, fps]);
+    log.push([Date.now(), driveCode, micCode, takeLevel(), toneRunning ? 1 : 0, fps, core.signalBits(sensor.signals)]);
   }
 
   function startDrive() {
@@ -1143,12 +1225,16 @@
     setRow('ev-log', gappy ? 'warn' : 'ok', duration(r.durationS) + ' protokolliert, ' + r.count + ' Einträge',
       'Quelle: ' + source + '.' + storageNote + (r.gapS ? ' Lücken: ' + r.gapS + ' s ohne Eintrag, die Seite stand in dieser Zeit still.' : ' Keine Lücken.'));
 
+    // Which signal of the sensor saw the drive: the answer the car test is after.
+    var sig = r.signalSeconds;
+    var signalText = ' Signale: pausiert ' + sig.paused + ' s, Uhr stand ' + sig.clock + ' s, keine Bilder ' + sig.frames +
+      ' s, Abbild stand ' + sig.still + ' s, Abbild schwarz ' + sig.black + ' s.';
     if (r.basis === 'drive') {
       setRow('ev-drive', 'ok', 'Fahrbetrieb erkannt: ' + r.driveS + ' s',
-        'Parkmodus ' + r.parkS + ' s, unklar ' + r.unknownS + ' s. Die Urteile unten gelten nur für die Sekunden im Fahrbetrieb.');
+        'Parkmodus ' + r.parkS + ' s, unklar ' + r.unknownS + ' s. Die Urteile unten gelten nur für den Fahrbetrieb.' + signalText);
     } else {
       setRow('ev-drive', 'warn', 'Kein Fahrbetrieb erkannt (' + r.driveS + ' s)',
-        'Der Fahrsensor hat nicht ausgelöst: Parkmodus ' + r.parkS + ' s, unklar ' + r.unknownS + ' s. Die Urteile unten gelten für das gesamte Protokoll.');
+        'Parkmodus ' + r.parkS + ' s, unklar ' + r.unknownS + ' s. Die Urteile unten gelten für das gesamte Protokoll.' + signalText);
     }
 
     var verb = { ok: ' lief ' + where + ' weiter', partial: ' lief ' + where + ' nur zeitweise', fail: ' lief ' + where + ' nicht' };
@@ -1228,6 +1314,7 @@
       });
     });
     startSensor();
+    armFrameCounter();
 
     $('btn-tone').addEventListener('click', toggleTone);
     $('btn-mic').addEventListener('click', toggleMic);

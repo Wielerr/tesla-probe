@@ -153,40 +153,77 @@ var ProbeCore = (function () {
 
   /**
    * Turns observations of the hidden sensor video into 'park', 'drive' or
-   * 'unknown'. The page never pauses that video itself, so a pause or a
-   * freeze on a visible page is the car's doing.
+   * 'unknown'. The page never pauses that video itself, so whatever stops
+   * it on a visible page is the car's doing.
    *
-   * update({ t, available, visible, paused, currentTime }) returns the state.
+   * update({ t, available, visible, paused, currentTime, frames, image })
+   * returns the state. Four signals can show driving:
+   *
+   *   paused        the element was paused
+   *   currentTime   the playback clock stands for 2 s
+   *   frames        pictures presented since the last update, null if the
+   *                 browser cannot count them: none for 2 s
+   *   image         'moving', 'still' or 'black' from a copy of the picture,
+   *                 null if it cannot be read: not moving for 2 s
+   *
+   * A Tesla in D (measured in November 2026) does not pause the element
+   * and lets its clock run. Only the picture stands still, so only the
+   * last two signals can see it. `signals` says what each one shows.
    */
   function createDriveSensor() {
     var lastTime = null;
     var lastAdvance = 0;
+    var lastFrameAt = 0;
+    var lastMovingAt = 0;
     var playingSince = null;
     var wasVisible = false;
 
     var sensor = {
       state: 'unknown',
       reason: 'unavailable',
+      signals: { paused: false, clock: 'unknown', frames: 'unknown', image: 'unknown' },
       update: function (x) {
         if (!x.available || !x.visible) {
           sensor.state = 'unknown';
           sensor.reason = x.available ? 'hidden' : 'unavailable';
+          sensor.signals = { paused: !!x.paused, clock: 'unknown', frames: 'unknown', image: 'unknown' };
           wasVisible = false;
           playingSince = null;
           return sensor.state;
         }
         if (!wasVisible) {
-          // Browsers pause video on hidden pages themselves: start the freeze timer fresh.
+          // Browsers pause video on hidden pages themselves: start the freeze timers fresh.
           wasVisible = true;
           lastTime = x.currentTime;
           lastAdvance = x.t;
+          lastFrameAt = x.t;
+          lastMovingAt = x.t;
         }
         if (x.currentTime !== lastTime) {
           lastTime = x.currentTime;
           lastAdvance = x.t;
         }
+        // A signal the browser cannot deliver never counts as stopped.
+        var countsFrames = typeof x.frames === 'number';
+        var readsImage = x.image === 'moving' || x.image === 'still' || x.image === 'black';
+        if (!countsFrames || x.frames > 0) lastFrameAt = x.t;
+        if (!readsImage || x.image === 'moving') lastMovingAt = x.t;
 
-        var blocked = x.paused ? 'paused' : x.t - lastAdvance >= STALL_MS ? 'stalled' : '';
+        var clockStopped = x.t - lastAdvance >= STALL_MS;
+        var framesStopped = countsFrames && x.t - lastFrameAt >= STALL_MS;
+        var imageStopped = readsImage && x.t - lastMovingAt >= STALL_MS;
+        sensor.signals = {
+          paused: !!x.paused,
+          clock: clockStopped ? 'stopped' : 'running',
+          frames: !countsFrames ? 'unknown' : framesStopped ? 'stopped' : 'running',
+          image: !readsImage ? 'unknown' : imageStopped ? x.image : 'moving'
+        };
+
+        var blocked = x.paused ? 'paused'
+          : clockStopped ? 'stalled'
+          : framesStopped ? 'no-frames'
+          : imageStopped ? (x.image === 'black' ? 'black-image' : 'frozen-image')
+          : '';
         if (blocked) {
           sensor.state = 'drive';
           sensor.reason = blocked;
@@ -206,6 +243,54 @@ var ProbeCore = (function () {
       }
     };
     return sensor;
+  }
+
+  // Bits of the seventh field of a log entry: which sensor signals were stopped in that second.
+  var SIGNAL = { PAUSED: 1, CLOCK: 2, FRAMES: 4, STILL: 8, BLACK: 16 };
+
+  /** Packs the signals of the drive sensor into one number for the log. */
+  function signalBits(signals) {
+    if (!signals) return 0;
+    return (signals.paused ? SIGNAL.PAUSED : 0) +
+      (signals.clock === 'stopped' ? SIGNAL.CLOCK : 0) +
+      (signals.frames === 'stopped' ? SIGNAL.FRAMES : 0) +
+      (signals.image === 'still' ? SIGNAL.STILL : 0) +
+      (signals.image === 'black' ? SIGNAL.BLACK : 0);
+  }
+
+  // ---- picture of the sensor video ---------------------------------------
+
+  var BLACK_BELOW = 24; // brightest column of a picture that counts as black
+  var SAME_WITHIN = 8; // brightness change per column that is still noise
+
+  /** Mean brightness (0 to 255) of every column of an RGBA picture. */
+  function imageSignature(rgba, width, height) {
+    var columns = [];
+    for (var x = 0; x < width; x++) {
+      var sum = 0;
+      for (var y = 0; y < height; y++) {
+        var i = (y * width + x) * 4;
+        sum += rgba[i] + rgba[i + 1] + rgba[i + 2];
+      }
+      columns.push(Math.round(sum / (height * 3)));
+    }
+    return columns;
+  }
+
+  /**
+   * Compares two signatures of the sensor video, taken a second apart:
+   * 'moving', 'still' or 'black'. The video shows a bright bar wandering
+   * over a dark ground, so a healthy picture always moves.
+   */
+  function compareImages(previous, current) {
+    var brightest = 0;
+    var change = 0;
+    for (var i = 0; i < current.length; i++) {
+      if (current[i] > brightest) brightest = current[i];
+      if (previous) change = Math.max(change, Math.abs(current[i] - previous[i]));
+    }
+    if (brightest < BLACK_BELOW) return 'black';
+    return !previous || change >= SAME_WITHIN ? 'moving' : 'still';
   }
 
   // ---- ring log ----------------------------------------------------------
@@ -303,7 +388,7 @@ var ProbeCore = (function () {
 
   // ---- evaluation --------------------------------------------------------
 
-  // Log entry layout: [timeMs, drive, mic, levelDb, tone, fps]
+  // Log entry layout: [timeMs, drive, mic, levelDb, tone, fps, signalBits]
   var DRIVE = { PARK: 0, DRIVE: 1, UNKNOWN: 2 };
   var MIC = { NONE: 0, LIVE: 1, MUTED: 2, ENDED: 3 };
   var MIN_DRIVE_S = 5;
@@ -333,7 +418,9 @@ var ProbeCore = (function () {
       basis: 'none',
       mic: { verdict: 'nodata', share: 0, meanDb: null },
       tone: { verdict: 'nodata', share: 0 },
-      canvas: { verdict: 'nodata', share: 0, medianFps: null }
+      canvas: { verdict: 'nodata', share: 0, medianFps: null },
+      // Seconds in which each signal of the drive sensor was stopped: shows which one sees the car driving.
+      signalSeconds: { paused: 0, clock: 0, frames: 0, still: 0, black: 0 }
     };
     if (count === 0) return result;
 
@@ -346,6 +433,12 @@ var ProbeCore = (function () {
       if (e[1] === DRIVE.DRIVE) result.driveS++;
       else if (e[1] === DRIVE.PARK) result.parkS++;
       else result.unknownS++;
+      var bits = typeof e[6] === 'number' ? e[6] : 0;
+      if (bits & SIGNAL.PAUSED) result.signalSeconds.paused++;
+      if (bits & SIGNAL.CLOCK) result.signalSeconds.clock++;
+      if (bits & SIGNAL.FRAMES) result.signalSeconds.frames++;
+      if (bits & SIGNAL.STILL) result.signalSeconds.still++;
+      if (bits & SIGNAL.BLACK) result.signalSeconds.black++;
       if (i > 0) {
         var step = e[0] - entries[i - 1][0];
         if (step > 2500) result.gapS += Math.round(step / 1000) - 1;
@@ -410,6 +503,23 @@ var ProbeCore = (function () {
     return { verdict: 'fail', reason: 'no-effect', attenuationDb: attenuation };
   }
 
+  /**
+   * Judges how far the singing voice stands above the music that the
+   * microphone picks up from the speakers, both in dBFS. Pitch detection
+   * follows the loudest tone, so the voice has to win clearly.
+   */
+  function voiceVerdict(levels) {
+    var music = levels.musicDb;
+    var voice = levels.voiceDb;
+    if (typeof music !== 'number' || typeof voice !== 'number') {
+      return { verdict: 'fail', reason: 'nodata', marginDb: null };
+    }
+    var margin = Math.round(voice - music);
+    if (margin >= 12) return { verdict: 'ok', reason: 'clear', marginDb: margin };
+    if (margin >= 6) return { verdict: 'warn', reason: 'close', marginDb: margin };
+    return { verdict: 'fail', reason: 'buried', marginDb: margin };
+  }
+
   // ---- small helpers -----------------------------------------------------
 
   function fpsVerdict(fps) {
@@ -446,9 +556,13 @@ var ProbeCore = (function () {
     makeWav: makeWav,
     makeMelody: makeMelody,
     createDriveSensor: createDriveSensor,
+    signalBits: signalBits,
+    imageSignature: imageSignature,
+    compareImages: compareImages,
     createRingLog: createRingLog,
     evaluate: evaluate,
     echoVerdict: echoVerdict,
+    voiceVerdict: voiceVerdict,
     fpsVerdict: fpsVerdict,
     buttonHeight: buttonHeight,
     parseUserAgent: parseUserAgent
