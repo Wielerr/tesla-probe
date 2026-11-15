@@ -122,6 +122,9 @@ var ProbeCore = (function () {
   // A3 C4 E4 G4 A4 G4 E4 C4: a calm pentatonic figure in the range of a singing voice.
   var MELODY_HZ = [220, 261.63, 329.63, 392, 440, 392, 329.63, 261.63];
   var MELODY_NOTE_S = 0.5;
+  // One loop. Its notes arrive at the microphone at very different levels, so a
+  // level only means something when it is taken over exactly one loop.
+  var MELODY_MS = MELODY_HZ.length * MELODY_NOTE_S * 1000;
 
   /**
    * Four-second test melody that loops without a click. It stands in for
@@ -505,14 +508,20 @@ var ProbeCore = (function () {
 
   /**
    * Judges how far the singing voice stands above the music that the
-   * microphone picks up from the speakers, both in dBFS. Pitch detection
-   * follows the loudest tone, so the voice has to win clearly.
+   * microphone picks up from the speakers, both in dBFS and measured one
+   * after the other. Pitch detection follows the loudest tone, so the voice
+   * has to win clearly. A voice level close to the room level (silenceDb,
+   * optional) means that nobody sang: that is no result, not a bad one.
    */
   function voiceVerdict(levels) {
     var music = levels.musicDb;
     var voice = levels.voiceDb;
+    var silence = levels.silenceDb;
     if (typeof music !== 'number' || typeof voice !== 'number') {
       return { verdict: 'fail', reason: 'nodata', marginDb: null };
+    }
+    if (typeof silence === 'number' && voice - silence < 6) {
+      return { verdict: 'warn', reason: 'silent', marginDb: null };
     }
     var margin = Math.round(voice - music);
     if (margin >= 12) return { verdict: 'ok', reason: 'clear', marginDb: margin };
@@ -555,6 +564,7 @@ var ProbeCore = (function () {
     noteName: noteName,
     makeWav: makeWav,
     makeMelody: makeMelody,
+    MELODY_MS: MELODY_MS,
     createDriveSensor: createDriveSensor,
     signalBits: signalBits,
     imageSignature: imageSignature,

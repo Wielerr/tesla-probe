@@ -8,7 +8,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '3';
+  var VERSION = '4';
   var core = window.ProbeCore;
 
   var LOG_SECONDS = 30 * 60;
@@ -776,7 +776,7 @@
 
   // ---- 7 echo --------------------------------------------------------------
 
-  var ECHO_HELP = 'Lautstärke wie beim Singen einstellen und „Echo messen“ tippen. Erst zwölf Sekunden still sein, dann fünf Sekunden laut mitsingen.';
+  var ECHO_HELP = 'Lautstärke wie beim Singen einstellen und „Echo messen“ tippen. Still sein, die Melodie läuft zweimal. Sobald sie verstummt, fünf Sekunden laut singen.';
   var echoBusy = false;
 
   /**
@@ -788,21 +788,23 @@
     var echo = core.echoVerdict(levels);
     // The quieter of the two settings is the one the player would use.
     var music = typeof levels.onDb === 'number' && typeof levels.offDb === 'number' ? Math.min(levels.onDb, levels.offDb) : null;
-    var voice = core.voiceVerdict({ musicDb: music, voiceDb: levels.voiceDb });
+    var voice = core.voiceVerdict({ musicDb: music, voiceDb: levels.voiceDb, silenceDb: levels.silenceDb });
     var text = {
       nodata: 'Messung ohne Signal: Das Mikrofon lieferte keine Daten',
+      silent: 'Keine Stimme gemessen',
       clear: 'Stimme ' + voice.marginDb + ' dB über der Musik',
       close: 'Stimme nur ' + voice.marginDb + ' dB über der Musik',
       buried: voice.marginDb > 0 ? 'Stimme nur ' + voice.marginDb + ' dB über der Musik' : 'Stimme nicht lauter als die Musik'
     }[voice.reason];
     // Kept short: the row is narrow in the car and has to stay readable on a photo.
-    var detail = 'Stimme ' + decibel(levels.voiceDb) + ', Ruhe ' + decibel(levels.silenceDb) + '. ' + {
-      nodata: '',
-      quiet: 'Das Mikrofon hört die Melodie kaum, lauter stellen.',
-      effective: 'Echounterdrückung nimmt ' + echo.attenuationDb + ' dB weg.',
-      partial: 'Echounterdrückung nimmt nur ' + echo.attenuationDb + ' dB weg.',
-      'no-effect': 'Echounterdrückung bewirkt nichts.'
-    }[echo.reason];
+    var detail = 'Stimme ' + decibel(levels.voiceDb) + ', Ruhe ' + decibel(levels.silenceDb) + '. ' +
+      (voice.reason === 'silent' ? 'Wiederholen und im vierten Schritt laut singen.' : {
+        nodata: '',
+        quiet: 'Das Mikrofon hört die Melodie kaum, lauter stellen.',
+        effective: 'Echounterdrückung nimmt ' + echo.attenuationDb + ' dB weg.',
+        partial: 'Echounterdrückung nimmt nur ' + echo.attenuationDb + ' dB weg.',
+        'no-effect': 'Echounterdrückung bewirkt nichts.'
+      }[echo.reason]);
     if (applied.on === false || applied.off === true) {
       detail += ' Der Browser hat die Einstellung nicht übernommen (gemeldet: ' + onOff(applied.on) + ' und ' + onOff(applied.off) + ').';
     }
@@ -848,10 +850,10 @@
         return playTone(true);
       })
       .then(function () {
-        return wait(1500); // the canceller needs a moment to adapt
+        return wait(1000); // the canceller needs a moment to adapt
       })
       .then(function () {
-        return measureLevel(2500);
+        return measureLevel(core.MELODY_MS);
       })
       .then(function (db) {
         levels.onDb = db;
@@ -864,23 +866,24 @@
         return playTone(true);
       })
       .then(function () {
-        return wait(1500);
-      })
-      .then(function () {
-        return measureLevel(2500);
-      })
-      .then(function (db) {
-        levels.offDb = db;
-        // The melody plays on: now the voice has to show how far it stands above it.
-        progress(4, 'Jetzt laut mitsingen', 'Fünf Sekunden lang laut mitsingen oder summen, so wie später beim Karaoke.');
         return wait(1000);
       })
       .then(function () {
-        return measureLevel(4000);
+        return measureLevel(core.MELODY_MS);
+      })
+      .then(function (db) {
+        levels.offDb = db;
+        // Voice and music are measured one after the other. Sung on top of the
+        // melody, the voice could not be told apart from it.
+        stopTone();
+        progress(4, 'Jetzt laut singen', 'Die Musik ist aus. Fünf Sekunden lang laut singen oder summen, so wie später beim Karaoke.');
+        return wait(1000);
+      })
+      .then(function () {
+        return measureLevel(core.MELODY_MS);
       })
       .then(function (db) {
         levels.voiceDb = db;
-        stopTone();
         renderEcho(levels, applied);
       })
       .catch(function (e) {
